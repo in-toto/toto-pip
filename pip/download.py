@@ -13,6 +13,12 @@ import shutil
 import sys
 import tempfile
 
+import tarfile
+import base64
+import copy
+import toto.verifylib
+import glob
+
 try:
     import ssl  # noqa
     HAS_TLS = True
@@ -657,6 +663,18 @@ def unpack_http_url(link, location, download_dir=None,
                                                      session,
                                                      temp_dir,
                                                      hashes)
+        # FIXME: this is a dirty kludge to force downloading the toto metadata
+        sig_url = ".asc#".join(link.url.split("#"))
+        sig_link = copy.deepcopy(link)
+        sig_link.url = sig_url
+
+        sig_path, content_type = _download_http_url(sig_link,
+                                                    session,
+                                                    temp_dir,
+                                                    None)
+
+    if _unpack_toto_metadata(sig_path, temp_dir):
+        _verify_toto_metadata(temp_dir)
 
     # unpack the archive to the build dir location. even when only downloading
     # archives, they have to be unpacked to parse dependencies
@@ -880,6 +898,7 @@ def _download_http_url(link, session, temp_dir, hashes):
     file_path = os.path.join(temp_dir, filename)
     with open(file_path, 'wb') as content_file:
         _download_url(resp, link, content_file, hashes)
+
     return file_path, content_type
 
 
@@ -904,3 +923,37 @@ def _check_download_dir(link, download_dir, hashes):
                 return None
         return download_path
     return None
+
+def _unpack_toto_metadata(path, target_dir):
+    # we load the string and strip the bogus PGP headers and tails.
+    with open(path) as fp:
+        base64_string = fp.read()
+
+    base64_string = base64_string.replace("-----BEGIN PGP SIGNATURE-----", "");
+    base64_string = base64_string.replace("\n", "")
+
+    tar_bytes = base64.b64decode(base64_string)
+
+    # write the tarfile and extract it
+    # FIXME: maybe we could be more clever than this
+    tarpath = os.path.join(target_dir, "toto_metadata.tar.gz")
+    with open(tarpath, "w") as fp:
+        fp.write(tar_bytes)
+
+    # FIXME: some error checking here would be nice
+    tar = tarfile.open(tarpath)
+    tar.extractall(path=target_dir)
+    tar.close()
+
+    return True
+
+def _verify_toto_metadata(target_dir):
+    # FIXME: maybe toto verify could handle a target dir parameter?
+    cwd_backup = os.getcwd()
+    os.chdir(target_dir)
+
+    # FIXME. layout discovery should be smarter
+    # and the keys shouldn't be shipped with the package!!
+    toto.verifylib.in_toto_verify("root.layout", ["justin.pub"])
+
+    os.chdir(cwd_backup)
